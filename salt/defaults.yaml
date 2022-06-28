@@ -48,7 +48,7 @@ salt:
   salt_cloud: salt-cloud
   salt_api: salt-api
   salt_ssh: salt-ssh
-
+  use_pkgrepo: true
   pkgrepo: ''          # see osfamilymap
   ssh_roster: {}       # see pillar data
 
