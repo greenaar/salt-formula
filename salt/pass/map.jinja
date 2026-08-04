@@ -1,0 +1,70 @@
+{#-
+  salt.pass / map.jinja
+  ---------------------------------------------------------------------------
+  Computed values for the `pass`-backed credential store that the master
+  decrypts during Pillar compilation.
+
+  Everything here is overridable through pillar under `salt:pass` (see
+  defaults.yaml and pillar.example).
+
+  The resolver's options are written to a standalone `_`-prefixed file in
+  master.d rather than rendered from pillar under `salt:master`. The
+  resolver runs during pillar compilation, so pillar-derived config cannot
+  be recovered from: fixing it requires compiling the pillar it broke. The
+  underscore keeps master.sls's `clean: true` from deleting it.
+#}
+
+{%- set tplroot = tpldir.split('/')[0] %}
+{%- from tplroot ~ "/map.jinja" import salt_settings with context %}
+
+{%- set _p = salt_settings.pass %}
+
+{%- set _user = _p.user %}
+{%- set _group = _p.group or _user %}
+
+{#-
+  The identity that encrypted the store. `pass init` records it in
+  <store_dir>/.gpg-id; generating a *different* key later produces a
+  keyring that cannot decrypt any existing entry, so init.sls guards key
+  creation on the identity already being absent and never rotates it.
+#}
+{%- set _identity = _p.gpg_identity %}
+
+{%- if _p.enabled and not _identity %}
+  {{ raise('salt:pass:gpg_identity must be set in pillar once salt:pass:enabled is true, e.g. salt: {pass: {enabled: true, gpg_identity: "Salt Master Secrets <salt@example.net>"}}') }}
+{%- endif %}
+
+{#-
+  master.sls excludes only `_*` from its `clean: true` recurse over
+  master.d. A master_config placed there without the prefix is deleted on
+  the next highstate, and the master then loses pass_dir and stops
+  compiling pillar for every minion -- a failure that is silent in state
+  output. Refuse to render rather than deploy that.
+#}
+{%- if _p.enabled and _p.manage_master_config %}
+{%-   set _cfg_dir = _p.master_config.rsplit('/', 1)[0] %}
+{%-   set _cfg_name = _p.master_config.rsplit('/', 1)[-1] %}
+{%-   if _cfg_dir.endswith('/master.d') and not _cfg_name.startswith('_') %}
+  {{ raise('salt:pass:master_config must use a filename starting with "_" when written into master.d (got "' ~ _cfg_name ~ '"); salt.master deploys that directory with clean:true and excludes only _* names, so any other file is deleted on the next highstate and pillar compilation fails for every minion.') }}
+{%-   endif %}
+{%- endif %}
+
+{%- set sp = {
+    'enabled':               _p.enabled,
+    'user':                  _user,
+    'group':                 _group,
+    'gpg_home':              _p.gpg_home,
+    'store_dir':             _p.store_dir,
+    'gpg_identity':          _identity,
+    'gpg_id_file':           _p.store_dir ~ '/.gpg-id',
+    'manage_master_config':  _p.manage_master_config,
+    'master_config':         _p.master_config,
+    'strict_fetch':          _p.strict_fetch,
+    'timeout':               _p.timeout,
+    'helper_path':           _p.helper_path,
+    'manage_helper':         _p.manage_helper,
+    'packages':              _p.packages,
+    'install_packages':      _p.install_packages,
+    'sync_pillar_resolver':  _p.sync_pillar_resolver,
+    'sync_renderer':         _p.sync_renderer,
+} %}

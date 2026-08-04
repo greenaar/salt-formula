@@ -1,0 +1,152 @@
+{#-
+  salt.exporter / map.jinja
+  ---------------------------------------------------------------------------
+  Single source of truth for computed values: architecture detection,
+  download URLs, filesystem paths and per-instance defaults for the
+  salt-exporter (Prometheus exporter for salt-master job/event metrics)
+  sub-state.
+
+  Everything here is overridable through pillar under `salt:exporter` (see
+  defaults.yaml and pillar.example). Nothing in this file talks to the
+  network - it only builds strings and dicts that install.sls / config.sls
+  / service.sls / firewall.sls consume.
+#}
+
+{%- set tplroot = tpldir.split('/')[0] %}
+{%- from tplroot ~ "/map.jinja" import salt_settings with context %}
+
+{%- set ex = salt_settings.exporter %}
+
+{#- ------------------------------------------------------------------- -#}
+{#- 1. Architecture / OS detection                                     -#}
+{#- ------------------------------------------------------------------- -#}
+{#-
+  salt-exporter is released via GoReleaser with this archive template
+  (see .goreleaser.yaml in the upstream repo):
+
+      {{ "{{ .ProjectName }}_{{ .Version }}_{{- title .Os }}_{{ .Arch }}" }}
+
+  i.e. for v0.13.0 on linux/amd64:  salt-exporter_0.13.0_Linux_amd64.tar.gz
+
+  GoReleaser's {{ "{{ .Arch }}" }} uses Go's GOARCH names (amd64, arm64, 386),
+  and {{ "{{ title .Os }}" }} title-cases the OS (linux -> Linux). As of the
+  current upstream release matrix only linux/386, linux/amd64 and
+  linux/arm64 archives are published (no armv7/arm build yet), but the
+  mapping below is written so that adding one later is a one-line change,
+  and it can be fully overridden per-minion via pillar if needed.
+#}
+{%- set _default_arch_map = {
+    'x86_64':  'amd64',
+    'amd64':   'amd64',
+    'aarch64': 'arm64',
+    'arm64':   'arm64',
+    'i686':    '386',
+    'i386':    '386',
+    'x86':     '386',
+    'armv7l':  'arm',
+    'armv6l':  'arm',
+} %}
+
+{%- do _default_arch_map.update(ex.lookup.get('arch_map', {})) %}
+
+{%- set _cpuarch = grains.get('cpuarch', '') %}
+{%- set _goarch = ex.arch_override or _default_arch_map.get(_cpuarch, _cpuarch) %}
+
+{%- set _kernel = grains.get('kernel', 'Linux') %}
+{%- set _os_title = _kernel[0]|upper ~ _kernel[1:]|lower if _kernel else 'Linux' %}
+
+{#- ------------------------------------------------------------------- -#}
+{#- 2. Release coordinates                                              -#}
+{#- ------------------------------------------------------------------- -#}
+{%- set _version = ex.version %}
+{%- if ex.enabled and not _version %}
+  {{ raise('salt:exporter:version must be set in pillar once salt:exporter:enabled is true, e.g. salt: {exporter: {enabled: true, version: "0.13.0"}}') }}
+{%- endif %}
+
+{#-
+  release_base_url defaults to the public GitHub releases endpoint but can
+  be repointed at an internal artifact mirror. Whatever it points to must
+  serve two things at the same layout as GitHub does:
+    <base_url>/download/v<version>/<archive_name>
+    <base_url>/download/v<version>/checksums.txt
+  Internal mirrors that don't follow this layout can instead set
+  salt:exporter:download_url_override / checksums_url_override directly.
+#}
+{%- set _base_url = ex.release_base_url %}
+
+{%- set _archive_name = 'salt-exporter_' ~ _version ~ '_' ~ _os_title ~ '_' ~ _goarch ~ '.tar.gz' %}
+
+{%- set _download_url = ex.download_url_override or (_base_url ~ '/download/v' ~ _version ~ '/' ~ _archive_name) %}
+
+{%- set _checksums_url = ex.checksums_url_override or (_base_url ~ '/download/v' ~ _version ~ '/checksums.txt') %}
+
+{%- set _verify_checksum = ex.verify_checksum %}
+
+{#- ------------------------------------------------------------------- -#}
+{#- 3. Filesystem layout                                                -#}
+{#- ------------------------------------------------------------------- -#}
+{#- Use Salt's own cache dir instead of /tmp - survives reboots inside
+    the minion's managed area and is cleaned up by `salt-call saltutil.clean_cache` #}
+{%- set _cachedir = salt['config.get']('cachedir') ~ '/salt-exporter' %}
+{%- set _extract_dir = _cachedir ~ '/' ~ _version %}
+
+{%- set _install_dir = ex.install_dir %}
+{%- set _versioned_binary = _install_dir ~ '/salt-exporter-' ~ _version %}
+{%- set _symlink = _install_dir ~ '/salt-exporter' %}
+
+{%- set _user = ex.user %}
+{%- set _group = ex.group or _user %}
+{%- set _manage_user = ex.manage_user %}
+{%- set _uid = ex.uid %}
+{%- set _gid = ex.gid %}
+{%- set _extra_groups = ex.extra_groups %}
+{%- set _home_dir = ex.home_dir %}
+
+{%- set _config_root = ex.config_dir %}
+
+{#- ------------------------------------------------------------------- -#}
+{#- 4. Instances                                                        -#}
+{#- ------------------------------------------------------------------- -#}
+{#- Default is a single instance called "default". Add more keys under
+    salt:exporter:instances to run several exporters (different Salt
+    event buses, different ports) side by side off the same binary. #}
+{%- set _instances = ex.instances if ex.instances else {'default': {}} %}
+
+{#- ------------------------------------------------------------------- -#}
+{#- 5. Optional features                                                -#}
+{#- ------------------------------------------------------------------- -#}
+{%- set _firewall = ex.firewall %}
+{%- set _prometheus = ex.prometheus %}
+{%- set _log = ex.log %}
+{%- set _service_hardening_overrides = ex.service.get('hardening_overrides', {}) %}
+{%- set _prune_old_versions = ex.prune_old_versions %}
+
+{%- set se = {
+    'enabled':             ex.enabled,
+    'version':            _version,
+    'goarch':              _goarch,
+    'os_title':            _os_title,
+    'archive_name':        _archive_name,
+    'download_url':        _download_url,
+    'checksums_url':       _checksums_url,
+    'verify_checksum':     _verify_checksum,
+    'cachedir':            _cachedir,
+    'extract_dir':         _extract_dir,
+    'install_dir':         _install_dir,
+    'versioned_binary':    _versioned_binary,
+    'symlink':             _symlink,
+    'user':                _user,
+    'group':               _group,
+    'manage_user':         _manage_user,
+    'uid':                 _uid,
+    'gid':                 _gid,
+    'extra_groups':        _extra_groups,
+    'home_dir':            _home_dir,
+    'config_root':         _config_root,
+    'instances':           _instances,
+    'firewall':            _firewall,
+    'prometheus':          _prometheus,
+    'log':                 _log,
+    'hardening_overrides': _service_hardening_overrides,
+    'prune_old_versions':  _prune_old_versions,
+} %}

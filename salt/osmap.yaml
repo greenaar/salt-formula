@@ -1,0 +1,14 @@
+# -*- coding: utf-8 -*-
+# vim: ft=yaml
+---
+# Distro-specific overrides (grains.os), layered on top of osfamilymap.yaml.
+# The official Salt apt repository/.sources file is identical for Debian
+# and Ubuntu, so there is nothing to override today - this file exists as
+# an extension point. Example, if ever needed:
+#
+# Ubuntu:
+#   some_setting: some_value
+
+Debian: {}
+
+Ubuntu: {}

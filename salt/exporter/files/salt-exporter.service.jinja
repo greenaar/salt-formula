@@ -1,0 +1,107 @@
+{#-
+  Managed by Salt - formula: salt - state: exporter - instance: {{ instance_name }}
+  Rendered per-instance (rather than as a systemd %i template unit) so
+  that every hardening/capability/state-dir directive below can be a real
+  pillar-driven value instead of a lowest-common-denominator compromise.
+
+  Hardening notes:
+    - Runs as an unprivileged, dedicated, non-root user with no shell.
+    - NoNewPrivileges + full filesystem/namespace lockdown.
+    - CAP_NET_BIND_SERVICE is only granted if this instance's listen port
+      is privileged (< 1024); otherwise the capability set is empty.
+    - ProtectSystem=strict; the only writable path is this instance's own
+      state dir, and only if one is configured - by default the exporter
+      needs no persistent state at all.
+    - Aims for ~9-10/10 under `systemd-analyze security <unit>`.
+#}
+{%- set port = instance.get('_listen_port', None) %}
+{%- set needs_cap_bind = port is not none and port|int < 1024 %}
+{%- set svc = se.hardening_overrides %}
+{%- set state_dir = instance.get('state_dir', '') %}
+[Unit]
+Description=Salt Exporter (Prometheus exporter for SaltStack events) - instance {{ instance_name }}
+Documentation=https://kpetremann.github.io/salt-exporter/
+After=network-online.target
+Wants=network-online.target
+{%- if instance.get('after_salt_master', True) %}
+# Best-effort ordering only - does not hard-require salt-master, so this
+# service still starts (and can be independently useful) on minions that
+# don't run a local master.
+After=salt-master.service
+{%- endif %}
+
+[Service]
+Type=simple
+User={{ se.user }}
+Group={{ se.group }}
+WorkingDirectory={{ se.home_dir }}
+
+EnvironmentFile=-{{ se.config_root }}/{{ instance_name }}/exporter.env
+ExecStart={{ se.symlink }} -config-file={{ se.config_root }}/{{ instance_name }}/config.yaml $EXPORTER_EXTRA_ARGS
+{%- if instance.get('log_file', '') %}
+StandardOutput=append:{{ instance.get('log_file') }}
+StandardError=append:{{ instance.get('log_file') }}
+{%- endif %}
+
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=10s
+
+# --- Privilege / capability hardening -------------------------------------
+NoNewPrivileges=true
+{%- if needs_cap_bind %}
+CapabilityBoundingSet={{ svc.get('CapabilityBoundingSet', 'CAP_NET_BIND_SERVICE') }}
+AmbientCapabilities={{ svc.get('AmbientCapabilities', 'CAP_NET_BIND_SERVICE') }}
+{%- else %}
+CapabilityBoundingSet=
+AmbientCapabilities=
+{%- endif %}
+SecureBits=noroot-locked
+
+# --- Filesystem hardening ---------------------------------------------------
+ProtectSystem={{ svc.get('ProtectSystem', 'strict') }}
+ProtectHome={{ svc.get('ProtectHome', 'true') }}
+PrivateTmp={{ svc.get('PrivateTmp', 'true') }}
+{%- if state_dir %}
+ReadWritePaths={{ state_dir }}
+{%- endif %}
+
+# --- Kernel / namespace hardening ------------------------------------------
+ProtectKernelTunables={{ svc.get('ProtectKernelTunables', 'true') }}
+ProtectKernelModules={{ svc.get('ProtectKernelModules', 'true') }}
+ProtectKernelLogs={{ svc.get('ProtectKernelLogs', 'true') }}
+ProtectControlGroups={{ svc.get('ProtectControlGroups', 'true') }}
+ProtectClock={{ svc.get('ProtectClock', 'true') }}
+ProtectHostname={{ svc.get('ProtectHostname', 'true') }}
+ProtectProc={{ svc.get('ProtectProc', 'invisible') }}
+ProcSubset={{ svc.get('ProcSubset', 'pid') }}
+RestrictNamespaces={{ svc.get('RestrictNamespaces', 'true') }}
+RestrictRealtime={{ svc.get('RestrictRealtime', 'true') }}
+RestrictSUIDSGID={{ svc.get('RestrictSUIDSGID', 'true') }}
+LockPersonality={{ svc.get('LockPersonality', 'true') }}
+MemoryDenyWriteExecute={{ svc.get('MemoryDenyWriteExecute', 'true') }}
+RemoveIPC={{ svc.get('RemoveIPC', 'true') }}
+UMask={{ svc.get('UMask', '0077') }}
+
+# --- Network hardening -------------------------------------------------------
+RestrictAddressFamilies={{ svc.get('RestrictAddressFamilies', 'AF_UNIX AF_INET AF_INET6') }}
+{%- if svc.get('IPAddressDeny', '') %}
+IPAddressDeny={{ svc.get('IPAddressDeny') }}
+{%- endif %}
+
+# --- Syscall filtering -------------------------------------------------------
+SystemCallFilter={{ svc.get('SystemCallFilter', '@system-service') }}
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @clock @module
+SystemCallArchitectures={{ svc.get('SystemCallArchitectures', 'native') }}
+SystemCallErrorNumber=EPERM
+
+# --- Device access -----------------------------------------------------------
+DevicePolicy={{ svc.get('DevicePolicy', 'closed') }}
+
+# --- Resource limits ----------------------------------------------------------
+LimitNOFILE={{ svc.get('LimitNOFILE', 65536) }}
+LimitNPROC={{ svc.get('LimitNPROC', 512) }}
+TasksMax={{ svc.get('TasksMax', 64) }}
+
+[Install]
+WantedBy=multi-user.target

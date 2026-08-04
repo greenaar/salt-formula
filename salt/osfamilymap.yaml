@@ -1,0 +1,10 @@
+# -*- coding: utf-8 -*-
+# vim: ft=yaml
+---
+# This formula intentionally supports only the Debian os_family, which
+# covers both Debian (12/13) and Ubuntu (24.04+). Add an entry here only if
+# a setting genuinely differs across *all* Debian-family distros; use
+# osmap.yaml for distro-specific (Debian vs Ubuntu) overrides instead.
+
+Debian:
+  pkgrepo_managed: true

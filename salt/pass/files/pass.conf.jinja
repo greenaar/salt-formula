@@ -1,0 +1,25 @@
+
+# This file managed by Salt, do not edit by hand!!
+#
+# Bootstrap configuration for the `pass_resolver` external Pillar.
+#
+# These options are deliberately NOT rendered from Pillar. The resolver runs
+# during Pillar compilation, so a master that reads its store location from
+# Pillar cannot recover from any error that stops Pillar compiling: the
+# config is needed to compile the Pillar that would produce the config.
+#
+# The leading underscore in the filename matters. salt/master.sls deploys
+# master.d with file.recurse and `clean: true`, which deletes every file it
+# does not manage; only `_*` names are excluded. Renaming this file without
+# the prefix means it disappears on the next highstate, taking Pillar
+# compilation for every minion with it.
+#
+# `pass_variable_prefix` is intentionally absent. The resolver defaults it to
+# 'pass:' and walks every string in compiled Pillar, so setting it anywhere
+# Pillar can see makes the literal value 'pass:' parse as a credential
+# reference with an empty name.
+
+pass_gnupghome: {{ sp.gpg_home | json }}
+pass_dir: {{ sp.store_dir | json }}
+pass_strict_fetch: {{ sp.strict_fetch | lower }}
+pass_timeout: {{ sp.timeout }}

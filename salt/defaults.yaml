@@ -1,0 +1,636 @@
+# -*- coding: utf-8 -*-
+# vim: ft=yaml
+---
+# Default values for the `salt` formula.
+#
+# Scope: Debian 12/13 and Ubuntu 24.04+ only, Salt 3008 (onedir) and later.
+# Everything here can be overridden via pillar under the `salt:` key -- see
+# pillar.example for a fully worked example.
+
+salt:
+
+  # ---------------------------------------------------------------------
+  # Core / package management
+  # ---------------------------------------------------------------------
+  version: ''                # e.g. '3008.2' - empty means "latest available"
+  pin_version: true           # pin apt to the `version_series` below (recommended)
+  version_series: '3008.*'    # used by the apt pin file when pin_version is true
+  install_packages: true
+  use_pip: false               # install salt-cloud's apache-libcloud dep via pip
+  rootuser: root
+  rootgroup: root
+  config_path: /etc/salt
+  clean_config_d_dir: true
+  parallel: true                # used by salt.formulas' file/git states
+  retry_options:
+    attempts: 2
+    until: true
+    interval: 10
+    splay: 180
+
+  salt_master: salt-master
+  salt_minion: salt-minion
+  salt_syndic: salt-syndic
+  salt_cloud: salt-cloud
+  salt_api: salt-api
+  salt_ssh: salt-ssh
+
+  minion_remove_config: false
+  master_remove_config: false
+  minion_config_use_TOFS: false
+  master_config_use_TOFS: false
+
+  minion_service: salt-minion
+  minion_service_details:
+    state: running          # special value 'ignore' skips the service state entirely
+    enabled: true
+
+  master_service: salt-master
+  master_service_details:
+    state: running
+    enabled: true
+
+  api_service: salt-api
+  api_service_details:
+    state: running
+    enabled: true
+
+  syndic_service: salt-syndic
+
+  ssh_roster: {}              # see pillar data / files/roster.jinja
+
+  minion:
+    master_type: str          # unset/false => rendered by standalone.sls instead
+
+  # ---------------------------------------------------------------------
+  # Official apt repository (packages.broadcom.com) + GPG key handling
+  # ---------------------------------------------------------------------
+  # As of the Broadcom migration, Salt publishes a ready-made deb822
+  # `.sources` file via the salt-install-guide project release assets.
+  # Fetching that file instead of hand-building a `deb [signed-by=...] ...`
+  # line removes an entire class of bugs (typos, stale arch, wrong
+  # component names) that show up whenever the repo layout changes.
+  pkgrepo:
+    keyring_url: https://packages.broadcom.com/artifactory/api/security/keypair/SaltProjectKey/public
+    keyring_dir: /etc/apt/keyrings
+    keyring_armored: /etc/apt/keyrings/salt-archive-keyring.asc
+    keyring_path: /etc/apt/keyrings/salt-archive-keyring.pgp
+    # Pin this to a specific salt-install-guide release tag (e.g. 'v1.2')
+    # for full reproducibility; 'latest' tracks whatever Salt currently
+    # publishes as the canonical, always-correct repo definition.
+    sources_guide_ref: latest
+    sources_path: /etc/apt/sources.list.d/salt.sources
+    keyring_hash: ''    # optional: pin a source_hash for the GPG key download
+    # Fallback mirror. Empty (the default) => download the vendor-published
+    # salt.sources described above. Set to the base URL of an apt mirror to
+    # render the .sources file locally against that base instead - the
+    # escape hatch for upstream 401 lockouts / outages. e.g.
+    #   salt:pkgrepo:mirror_url: https://apt.example.com/mirror/packages.broadcom.com/artifactory/saltproject-deb
+    # A straight apt-mirror republishes dists/ unmodified (original Broadcom
+    # signatures intact), so the three fields below stay at their upstream
+    # values and the existing keyring keeps working. Only override them if
+    # your mirror re-signs or renames suites (aptly, reprepro, ...), in
+    # which case point keyring_url at your own key too.
+    mirror_url: ''
+    types: deb
+    suites: stable
+    components: main
+    # legacy locations this formula (and older community formulas) used to
+    # write to - cleaned up automatically so stale/duplicate repo defs and
+    # stale keys can't shadow the current config.
+    legacy_paths:
+      - /etc/apt/sources.list.d/salt.list
+      - /etc/apt/sources.list.d/saltstack.list
+      - /usr/share/keyrings/salt-archive.pgp
+      - /etc/apt/keyrings/salt-archive-keyring.gpg
+      # Written by older salt-bootstrap / install-guide revisions. If left
+      # behind alongside the current keyring, newer apt aborts *all* source
+      # parsing with "Conflicting values set for option Signed-By".
+      - /etc/apt/keyrings/salt-archive-keyring-2023.pgp
+      - /usr/share/keyrings/salt-archive-keyring.gpg
+      - /usr/share/keyrings/salt-archive-keyring.pgp
+
+  # ---------------------------------------------------------------------
+  # Extra bits Salt 3008 (onedir) requires: third-party python libraries
+  # and saltext-* packages must be installed *into the bundled onedir
+  # python*, not the system python, or the master/minion will not see
+  # them. See extensions.sls / README for details.
+  # ---------------------------------------------------------------------
+  extensions:
+    enabled: true
+    # path to the python interpreter bundled with the onedir package;
+    # override if SALT_EXTRAS_DIR was customized at install time.
+    python_bin: /opt/saltstack/salt/bin/python3
+    # apt packages needed to build any of the pip/saltext packages below
+    # (e.g. libgit2-dev for pygit2). Installed before the pip step.
+    build_dependencies: []
+    # arbitrary python packages to install into the onedir environment,
+    # e.g. pygit2, GitPython, dulwich, PyMySQL, python-telegram-bot ...
+    pip: []
+    # saltext-* packages (Salt's supported extension mechanism), name
+    # only - the 'saltext-' prefix is added automatically if missing.
+    saltext: []
+    # gitfs / git_pillar provider to make available. Both are master-only
+    # fileserver/pillar backends, so this defaults to '' (off) - minions
+    # have no use for it. Set to pygit2/gitpython/dulwich on your master
+    # pillar if you use gitfs_remotes / git_pillar / git.latest states.
+    gitfs_provider: ''
+
+    # Named bundle for Salt's *beacon* dependencies. None of Salt's
+    # beacons vendor their own libraries, so `beacons: {inotify: ...}`
+    # in minion config silently no-ops until the matching python module
+    # exists inside the onedir env. Grouped here because the mapping from
+    # beacon name to library is not discoverable from Salt's docs:
+    #
+    #   inotify           -> pyinotify (+ pyasyncore, see below)
+    #   network_settings  -> pyroute2
+    #   journald          -> systemd-python (compiles against libsystemd)
+    #   watchdog / diskusage file events -> watchdog
+    #
+    # pyasyncore is not a beacon dependency in its own right: pyinotify
+    # imports the stdlib `asyncore` module, which Python 3.12 removed
+    # (PEP 594). pyasyncore is the extracted standalone copy that keeps
+    # the import working on the 3.10+ interpreter Salt 3008 bundles.
+    #
+    # Deliberately NOT the distro python3-pyinotify / python3-pyroute2
+    # apt packages: those install into the *system* python, which the
+    # onedir salt-minion never imports. Only libsystemd-dev is apt, and
+    # only because systemd-python is a C extension built at pip time.
+    #
+    beacon_deps:
+      # true  - install the full `apt`/`pip` bundle below, unconditionally.
+      # false - install nothing.
+      # auto  - install only what the beacons configured for THIS minion
+      #         need, resolved through beacon_map. A minion with no beacon
+      #         pillar gets nothing, including no compiler toolchain.
+      #
+      # 'auto' is the useful setting for a formula-wide default: deps
+      # cannot drift from config, because adding a beacon to pillar is
+      # what pulls its library in. Use true only to pre-seed a host whose
+      # beacons are configured outside this formula.
+      enabled: auto
+      # Used when enabled is true. Ignored in auto mode.
+      apt:
+        - build-essential
+        - libsystemd-dev
+        - pkg-config
+      # Used when enabled is true. Ignored in auto mode. Merged with the
+      # `pip` list above.
+      pip:
+        - pyinotify
+        - pyasyncore
+        - pyroute2
+        - systemd-python
+        - watchdog
+      # beacon name -> what that beacon needs. Consulted in auto mode
+      # against the same pillar beacons.conf renders from
+      # (salt:beacons, then salt:minion:beacons merged over it), so the
+      # two cannot disagree. Beacons not listed here need nothing beyond
+      # what the onedir python already bundles (psutil covers status,
+      # load, memusage, swapusage, diskusage, service and sh), so an
+      # unrecognised name contributes nothing rather than erroring.
+      #
+      # Extend this from pillar for out-of-tree or custom beacons - the
+      # value is merged, so adding one key does not drop the rest.
+      beacon_map:
+        inotify:
+          # pyasyncore is not pyinotify's advertised dependency; pyinotify
+          # imports the stdlib `asyncore`, removed in 3.12 by PEP 594.
+          # Harmless on interpreters that still ship asyncore, so it is
+          # unconditional rather than version-gated.
+          pip:
+            - pyinotify
+            - pyasyncore
+        network_settings:
+          pip:
+            - pyroute2
+        network_info:
+          pip:
+            - pyroute2
+        journald:
+          # The only entry that compiles C, hence the only one that drags
+          # in a toolchain. This is precisely what auto mode spares hosts
+          # that do not read the journal.
+          apt:
+            - build-essential
+            - libsystemd-dev
+            - pkg-config
+          pip:
+            - systemd-python
+        watchdog:
+          pip:
+            - watchdog
+        telegram_bot_msg:
+          pip:
+            - python-telegram-bot
+        twilio_txt_msg:
+          pip:
+            - twilio
+        napalm:
+          pip:
+            - napalm
+
+  # ---------------------------------------------------------------------
+  # SaltGUI (https://github.com/erwindon/SaltGUI)
+  # ---------------------------------------------------------------------
+  saltgui:
+    enabled: false
+    # 'archive' (default, recommended) downloads a pinned release tarball;
+    # 'git' does a git.latest checkout of `ref` for people who want to
+    # track a branch instead of a release.
+    method: archive
+    # NOTE: SaltGUI's git tags have no 'v' prefix (e.g. '1.33.0', not
+    # 'v1.33.0') - double check https://github.com/erwindon/SaltGUI/tags
+    # before bumping this, a mismatched prefix 404s silently until applied.
+    version: '1.33.0'
+    ref: master
+    repo: https://github.com/erwindon/SaltGUI.git
+    archive_url: "https://github.com/erwindon/SaltGUI/archive/refs/tags/{version}.tar.gz"
+    target: /srv/saltgui
+    user: root
+    group: root
+    nginx:
+      enabled: false
+      server_name: salt-gui
+      listen: 80
+      # salt-api rest_cherrypy endpoint SaltGUI should talk to
+      api_backend: http://127.0.0.1:8000
+
+  # ---------------------------------------------------------------------
+  # Custom _modules / _states / _beacons / _utils shipped alongside this
+  # formula (see README for the full list). Docker-related helpers are
+  # intentionally left out of scope for this formula.
+  # ---------------------------------------------------------------------
+  sync_custom_modules: false
+
+  # ---------------------------------------------------------------------
+  # gitfs (legacy pillar knobs kept for file_roots/gitfs key management)
+  # ---------------------------------------------------------------------
+  gitfs:
+    keys: {}       # see pillar data / files/gitfs_key.jinja
+
+  cloud:
+    template_sources:
+      providers: salt://salt/files/cloud.providers.d
+      profiles: salt://salt/files/cloud.profiles.d
+      maps: salt://salt/files/cloud.maps.d
+
+  # ---------------------------------------------------------------------
+  # Log rotation for Salt components. Disabled globally by default so
+  # existing deployments are unchanged until explicitly opted in.
+  # Component values are merged over these defaults and may be overridden
+  # independently under salt:logrotate:components:<component>.
+  # ---------------------------------------------------------------------
+  logrotate:
+    enabled: false
+    package: logrotate
+    config_dir: /etc/logrotate.d
+    validate: true
+    validate_command: /usr/sbin/logrotate --debug
+    # Remove obsolete snippets created by this formula. The component list
+    # and exporter prefix are deliberately narrow; unrelated host files are
+    # never touched.
+    cleanup: true
+    managed_filenames:
+      - salt-minion
+      - salt-master
+      - salt-api
+      - salt-cloud
+      - salt-watchdog
+      - salt-exporter
+    exporter_filename_prefix: salt-exporter-
+    # The distro salt-common package ships /etc/logrotate.d/salt-common,
+    # which rotates /var/log/salt/* wholesale and therefore double-rotates
+    # every path this formula manages. Removed once logrotate handling here
+    # is enabled (and cleanup is on), so the packaged file never competes
+    # with the per-component snippets. Set to '' to leave it in place.
+    salt_common_filename: salt-common
+    components:
+      minion:
+        enabled: true
+        filename: salt-minion
+        paths:
+          - /var/log/salt/minion
+        frequency: daily
+        rotate: 14
+        maxage: null
+        size: ''
+        minsize: ''
+        maxsize: ''
+        missingok: true
+        notifempty: true
+        compress: true
+        delaycompress: true
+        dateext: false
+        dateformat: ''
+        copytruncate: true
+        sharedscripts: false
+        create: ''
+        su: root root
+        olddir: ''
+        prerotate: ''
+        postrotate: ''
+        firstaction: ''
+        lastaction: ''
+        extra_directives: []
+      master:
+        enabled: true
+        filename: salt-master
+        paths:
+          - /var/log/salt/master
+        frequency: daily
+        rotate: 14
+        maxage: null
+        size: ''
+        minsize: ''
+        maxsize: ''
+        missingok: true
+        notifempty: true
+        compress: true
+        delaycompress: true
+        dateext: false
+        dateformat: ''
+        copytruncate: true
+        sharedscripts: false
+        create: ''
+        su: root root
+        olddir: ''
+        prerotate: ''
+        postrotate: ''
+        firstaction: ''
+        lastaction: ''
+        extra_directives: []
+      api:
+        enabled: true
+        filename: salt-api
+        paths:
+          - /var/log/salt/api
+        frequency: daily
+        rotate: 14
+        maxage: null
+        size: ''
+        minsize: ''
+        maxsize: ''
+        missingok: true
+        notifempty: true
+        compress: true
+        delaycompress: true
+        dateext: false
+        dateformat: ''
+        copytruncate: true
+        sharedscripts: false
+        create: ''
+        su: root root
+        olddir: ''
+        prerotate: ''
+        postrotate: ''
+        firstaction: ''
+        lastaction: ''
+        extra_directives: []
+      cloud:
+        enabled: true
+        filename: salt-cloud
+        paths:
+          - /var/log/salt/cloud
+        frequency: daily
+        rotate: 14
+        maxage: null
+        size: ''
+        minsize: ''
+        maxsize: ''
+        missingok: true
+        notifempty: true
+        compress: true
+        delaycompress: true
+        dateext: false
+        dateformat: ''
+        copytruncate: true
+        sharedscripts: false
+        create: ''
+        su: root root
+        olddir: ''
+        prerotate: ''
+        postrotate: ''
+        firstaction: ''
+        lastaction: ''
+        extra_directives: []
+      watchdog:
+        enabled: true
+        filename: salt-watchdog
+        # Left empty on purpose: the watchdog writes to whatever
+        # salt:minion_watchdog:log_file points at (default
+        # /var/log/salt-minion-watchdog.log), which lives outside
+        # /var/log/salt. logrotate/watchdog.sls substitutes that value so
+        # the two cannot drift. Setting paths here overrides the lookup.
+        paths: []
+        frequency: daily
+        rotate: 14
+        maxage: null
+        size: ''
+        minsize: ''
+        maxsize: ''
+        missingok: true
+        notifempty: true
+        compress: true
+        delaycompress: true
+        dateext: false
+        dateformat: ''
+        # The watchdog cron appends to its log via a long-lived shell
+        # redirect, so the inode must be preserved on rotation.
+        copytruncate: true
+        sharedscripts: false
+        create: ''
+        su: root root
+        olddir: ''
+        prerotate: ''
+        postrotate: ''
+        firstaction: ''
+        lastaction: ''
+        extra_directives: []
+      exporter:
+        enabled: true
+        # One snippet per exporter instance permits independent policies.
+        per_instance: true
+        filename: salt-exporter
+        filename_prefix: salt-exporter-
+        # Used only when per_instance is false. Otherwise paths are derived
+        # from each enabled instance with log_file configured.
+        paths: []
+        frequency: daily
+        rotate: 14
+        maxage: null
+        size: ''
+        minsize: ''
+        maxsize: ''
+        missingok: true
+        notifempty: true
+        compress: true
+        delaycompress: true
+        dateext: false
+        dateformat: ''
+        copytruncate: true
+        sharedscripts: false
+        create: ''
+        su: root root
+        olddir: ''
+        prerotate: ''
+        postrotate: ''
+        firstaction: ''
+        lastaction: ''
+        extra_directives: []
+
+  # ---------------------------------------------------------------------
+  # salt-exporter (https://kpetremann.github.io/salt-exporter/) - a
+  # Prometheus exporter for salt-master job/event metrics. Master-only:
+  # gated in init.sls on the same salt:master pillar check as salt.master
+  # itself, so it never installs onto a plain minion. Off by default -
+  # requires at least `salt:exporter: {enabled: true, version: 'X.Y.Z'}`.
+  # See README for the full write-up.
+  # ---------------------------------------------------------------------
+  exporter:
+    enabled: false
+    version: ''                # required once enabled - release tag, no leading 'v'
+    verify_checksum: true
+    # Point at an internal artifact mirror instead of github.com. Must
+    # serve the same layout GitHub uses:
+    #   <release_base_url>/download/v<version>/salt-exporter_<version>_Linux_<arch>.tar.gz
+    #   <release_base_url>/download/v<version>/checksums.txt
+    release_base_url: https://github.com/kpetremann/salt-exporter/releases
+    download_url_override: ''    # bypass the URL template entirely for one exact archive URL
+    checksums_url_override: ''   # bypass the URL template entirely for one exact checksums URL
+    lookup:
+      arch_map: {}                # extend/override cpuarch -> GoReleaser GOARCH mapping
+    arch_override: ''             # force a specific arch string, skipping detection
+    install_dir: /usr/local/bin
+    config_dir: /etc/salt-exporter
+    home_dir: /var/lib/salt-exporter
+    manage_user: true
+    user: salt-exporter
+    group: salt-exporter
+    uid: null
+    gid: null
+    extra_groups: []              # e.g. [salt], so the exporter can read the local master's event IPC
+    prune_old_versions: false
+    service:
+      hardening_overrides: {}     # override any directive in files/exporter/salt-exporter.service.jinja
+    prometheus:
+      enabled: false
+      labels: {}                  # scrape-label metadata for a Prometheus formula/mine consumer
+    firewall:
+      enabled: false
+      backend: ufw                # ufw | firewalld
+      source: ''                  # CIDR; empty allows from anywhere
+      zone: public                 # firewalld only
+    log:
+      manage_directory: true
+      manage_file: true
+      directory_user: ''          # blank => exporter user
+      directory_group: ''         # blank => exporter group
+      directory_mode: '0750'
+      file_user: ''               # blank => exporter user
+      file_group: ''              # blank => exporter group
+      file_mode: '0640'
+    instances:
+      default: {}                  # see pillar.example for the full per-instance schema
+
+  # ---------------------------------------------------------------------
+  # pass-backed credential store for the master (was the standalone
+  # `salt_pass` formula). Encrypted credentials live outside pillar; pillar
+  # carries only `pass:name/of/credential` references, which the
+  # `pass_resolver` external pillar replaces during master-side pillar
+  # compilation. Master-only: gated in init.sls on the same salt:master
+  # check as salt.master. Off by default. See README for the full write-up.
+  #
+  # The resolver's own options (pass_dir, pass_gnupghome, pass_strict_fetch,
+  # pass_timeout) are written to master_config below rather than rendered
+  # from pillar under `salt:master`. The resolver runs *during* pillar
+  # compilation, so pillar-derived config is circular: any error that stops
+  # pillar compiling also removes the configuration needed to fix it.
+  #
+  # The leading underscore in master_config is load-bearing. master.sls
+  # deploys master.d with `clean: true` and excludes only `_*`; a file
+  # without the prefix is deleted on the next highstate.
+  #
+  # Do NOT set `pass_variable_prefix` in pillar at all: the resolver walks
+  # every string in compiled pillar, so the literal value 'pass:' is itself
+  # read as a reference with an empty name and breaks pillar compilation
+  # for that minion. It defaults to 'pass:' in the resolver.
+  # ---------------------------------------------------------------------
+  pass:
+    enabled: false
+    # Must match the identity that encrypted the existing store; compare
+    # against <store_dir>/.gpg-id before enabling. A different identity
+    # produces a key that cannot decrypt any existing entry.
+    gpg_identity: ''
+    user: root
+    group: root
+    gpg_home: /etc/salt/gpgkeys
+    store_dir: /var/lib/salt/password-store
+    # Bootstrap config for the resolver. Keep the `_` prefix; see above.
+    manage_master_config: true
+    master_config: /etc/salt/master.d/_pass.conf
+    # Fail pillar compilation on a missing or empty credential rather than
+    # handing the application a blank or unresolved value.
+    strict_fetch: true
+    # Seconds before a single `pass show` is abandoned. Each lookup forks
+    # gpg on a master worker thread; a long timeout lets one wedged
+    # gpg-agent starve the worker pool, which minions report as request
+    # timeouts.
+    timeout: 5
+    install_packages: true
+    packages:
+      - pass
+      - gnupg
+    manage_helper: true
+    helper_path: /usr/local/sbin/salt-secret
+    # Bootstrap steps only. Each shells out to `salt-run`, occupying a
+    # master worker thread and nesting a job inside the running job; run
+    # `salt-run saltutil.sync_pillar` by hand after changing the module
+    # rather than paying for it on every highstate.
+    sync_pillar_resolver: false
+    # Legacy decrypt_pillar support; the recommended pass_resolver external
+    # pillar does not need the renderer.
+    sync_renderer: false
+
+  # ---------------------------------------------------------------------
+  # salt-minion-watchdog - a cron-driven script that detects and recovers
+  # from a crashed/hung/wedged salt-minion. Minion-only: gated in
+  # init.sls on the same salt:minion pillar check as salt.minion /
+  # salt.standalone, so it only lands on hosts this formula is actually
+  # managing a minion on. Off by default. See README for the full write-up.
+  # ---------------------------------------------------------------------
+  minion_watchdog:
+    enabled: false
+    script_path: /usr/local/bin/salt-minion-watchdog.sh
+    log_file: /var/log/salt-minion-watchdog.log
+    minion_log_file: /var/log/salt/minion
+    state_dir: /var/run/salt-minion-watchdog
+    service_name: salt-minion
+    min_restart_interval: 60
+    stale_minutes: 20
+    extra_error_patterns: []
+    circuit_breaker:
+      max_restarts: 3
+      window_seconds: 3600
+    alert_cmd: ''
+    cron:
+      enabled: true
+      user: root
+      minute: '*/5'
+      hour: '*'
+      daymonth: '*'
+      month: '*'
+      dayweek: '*'
+      identifier: SALT_MINION_WATCHDOG
+
+salt_formulas:
+  list: {}     # via pillar data
+  checkout_orig_branch: false
+  git_opts:
+    default:
+      baseurl: https://github.com/saltstack-formulas
+      basedir: /srv/formulas
+      update: false
+      options:
+        rev: master
+        output_loglevel: 'quiet'

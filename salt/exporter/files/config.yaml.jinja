@@ -1,0 +1,10 @@
+{#-
+  Managed by Salt - formula: salt - state: exporter - instance: {{ instance_name }}
+  Any manual edits will be overwritten on the next highstate.
+
+  This file mirrors whatever dict is provided under
+  salt:exporter:instances:{{ instance_name }}:config in pillar, verbatim.
+  See the upstream docs for the full schema:
+  https://kpetremann.github.io/salt-exporter/
+#}
+{{ salt['slsutil.serialize']('yaml', instance_config) }}

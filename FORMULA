@@ -1,0 +1,9 @@
+name: salt
+os: Debian, Raspbian, Ubuntu
+os_family: Debian
+version: 1.0.0
+release: 1
+minimum_version: 3006
+summary: 'salt formula'
+description: 'Installs and configures Salt itself (master, minion, api, syndic, cloud, ssh) plus a few operational extras (extensions, SaltGUI, a Prometheus exporter, a minion watchdog, custom modules/states/beacons). Refactored to target a small, current OS/Salt matrix instead of trying to support'
+top_level_dir: salt

@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+{#- tpldir is not set here: this file is rendered as the `source:` of a
+    file.managed state (via cp.get_template), not as an SLS, so Salt never
+    populates tpldir/slspath for it. install.sls computes tplroot itself
+    (where tpldir IS valid) and passes it in via file.managed's `context:`. #}
+{%- from tplroot ~ "/minion_watchdog/map.jinja" import mw with context %}
+#
+# salt-minion-watchdog.sh
+#
+# Managed by Salt -- see the salt.minion_watchdog state.
+# Local edits will be overwritten on the next highstate.
+#
+# Detects and recovers from several classes of salt-minion failure:
+#
+#   1. Crash / OOM-kill  - the process is simply gone. Detected via a
+#      process-existence check (not log-based, since a crashed process
+#      writes nothing). Best-effort dmesg/journalctl check to log *why*
+#      it died if the OOM killer got it.
+#
+#   2. Hung / zombie minion - the process still exists but is wedged
+#      (deadlocked, stuck on a syscall, dropped off the master with no
+#      error ever logged). Detected via log-file staleness: if the
+#      process is alive but the log hasn't been written to in N minutes,
+#      treat it as hung.
+#
+#   3. Known fatal error strings in the log (dispatch timeouts, ZMQ/auth
+#      failures, network timeouts). Detected the same way as before: scanning newly
+#      appended log bytes for known patterns.
+#
+# In all three cases, the recovery action is the same: SIGKILL any
+# salt-minion processes and restart the service via systemctl (falling
+# back to service/init.d).
+#
+# A restart-loop circuit breaker tracks how many times we've restarted
+# in the trailing window. Once that count is reached, the script stops
+# auto-restarting and just alerts, on the theory that something is
+# structurally broken and repeated kill/restart cycles are more likely
+# to make things worse (e.g. hammering an overloaded master).
+#
+# Deployed to run from cron -- see salt/minion_watchdog/install.sls.
+#
+# Requires root (to kill -9 another user's process and restart the service).
+
+set -uo pipefail
+
+### ---- Configuration (rendered from pillar/defaults by Salt) --------- ###
+
+LOG_FILE="${SALT_MINION_LOG:-{{ mw.minion_log_file }}}"
+
+ERROR_PATTERNS=(
+    "Error dispatching event. Message timed out"
+    "Salt request timed out"
+    "ZMQError"
+    "Unable to connect to the salt master"
+    "SaltReqTimeoutError"
+    "Timeout encountered while sending"
+    "Request timed out while waiting for a response. reconnecting."
+{%- for pattern in mw.extra_error_patterns %}
+    "{{ pattern }}"
+{%- endfor %}
+)
+if [[ -n "${SALT_MINION_EXTRA_PATTERNS:-}" ]]; then
+    IFS=',' read -r -a _extra_patterns <<< "$SALT_MINION_EXTRA_PATTERNS"
+    ERROR_PATTERNS+=("${_extra_patterns[@]}")
+fi
+
+STATE_DIR="${SALT_MINION_WATCHDOG_STATE_DIR:-{{ mw.state_dir }}}"
+STATE_FILE="${STATE_DIR}/last_offset"
+
+SERVICE_NAME="${SALT_MINION_SERVICE_NAME:-{{ mw.service_name }}}"
+
+MIN_RESTART_INTERVAL="${SALT_MINION_MIN_RESTART_INTERVAL:-{{ mw.min_restart_interval }}}"
+LAST_RESTART_FILE="${STATE_DIR}/last_restart_epoch"
+
+STALE_THRESHOLD_MINUTES="${SALT_MINION_STALE_MINUTES:-{{ mw.stale_minutes }}}"
+
+CIRCUIT_BREAKER_MAX_RESTARTS="${SALT_MINION_CB_MAX_RESTARTS:-{{ mw.circuit_breaker.max_restarts }}}"
+CIRCUIT_BREAKER_WINDOW_SECONDS="${SALT_MINION_CB_WINDOW_SECONDS:-{{ mw.circuit_breaker.window_seconds }}}"
+RESTART_HISTORY_FILE="${STATE_DIR}/restart_history"
+CIRCUIT_BREAKER_FILE="${STATE_DIR}/circuit_open"
+
+ALERT_CMD="${SALT_MINION_ALERT_CMD:-{{ mw.alert_cmd }}}"
+
+### ---- Helpers ---------------------------------------------------------###
+
+log() {
+    printf '%s [salt-minion-watchdog] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+}
+
+alert() {
+    local msg="$*"
+    log "CRITICAL: ${msg}"
+    if [[ -n "$ALERT_CMD" ]]; then
+        WATCHDOG_ALERT_MSG="$msg" bash -c "$ALERT_CMD" \
+            || log "WARNING: ALERT_CMD failed to execute."
+    fi
+}
+
+require_root() {
+    if [[ "$(id -u)" -ne 0 ]]; then
+        log "ERROR: this script must be run as root (needed to kill -9 and restart the service)."
+        exit 1
+    fi
+}
+
+ensure_state_dir() {
+    mkdir -p "$STATE_DIR"
+}
+
+file_mtime_epoch() {
+    stat -c%Y "$1" 2>/dev/null || stat -f%m "$1"
+}
+
+file_size_bytes() {
+    stat -c%s "$1" 2>/dev/null || stat -f%z "$1"
+}
+
+# Returns salt-minion PIDs, excluding this watchdog script itself (which
+# also matches "salt-minion" via -f substring matching on its own path).
+get_minion_pids() {
+    local pid cmd
+    while read -r pid; do
+        [[ -z "$pid" ]] && continue
+        [[ "$pid" == "$$" ]] && continue
+        cmd=$(ps -p "$pid" -o cmd= 2>/dev/null || true)
+        [[ "$cmd" == *"salt-minion-watchdog"* ]] && continue
+        echo "$pid"
+    done < <(pgrep -f 'salt-minion' 2>/dev/null || true)
+}
+
+# Best-effort: log whether dmesg/journalctl shows the OOM killer taking out
+# a salt-minion process. Purely informational, never fatal.
+check_oom_kill() {
+    local hits=""
+    if command -v journalctl >/dev/null 2>&1; then
+        hits=$(journalctl -k --since "-30min" 2>/dev/null \
+            | grep -E 'Out of memory: Killed process .*salt-minion' \
+            | tail -n 5 || true)
+    fi
+    if [[ -z "$hits" ]] && command -v dmesg >/dev/null 2>&1; then
+        hits=$(dmesg -T 2>/dev/null \
+            | grep -E 'Out of memory: Killed process .*salt-minion' \
+            | tail -n 5 || true)
+    fi
+    if [[ -n "$hits" ]]; then
+        log "OOM killer evidence found:"
+        while IFS= read -r line; do log "  $line"; done <<< "$hits"
+    else
+        log "No OOM-killer evidence found in recent kernel log (process may have crashed for another reason, or kernel log is unavailable)."
+    fi
+}
+
+restart_minion() {
+    local reason="$1"
+    log "Restarting ${SERVICE_NAME} (reason: ${reason})..."
+
+    local pids
+    pids=$(get_minion_pids)
+
+    if [[ -n "$pids" ]]; then
+        log "Found salt-minion PID(s): $(echo "$pids" | tr '\n' ' ')"
+        # shellcheck disable=SC2086
+        kill -9 $pids 2>/dev/null
+        # Give the kernel a moment to actually reap the processes.
+        sleep 2
+    else
+        log "No running salt-minion process found; proceeding to start service anyway."
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl start "$SERVICE_NAME"
+        sleep 1
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            log "${SERVICE_NAME} restarted successfully (systemctl)."
+        else
+            log "WARNING: ${SERVICE_NAME} does not appear active after restart attempt (systemctl)."
+        fi
+    elif command -v service >/dev/null 2>&1; then
+        service "$SERVICE_NAME" start
+        log "${SERVICE_NAME} start command issued via 'service'."
+    else
+        log "ERROR: neither systemctl nor service command found; could not restart ${SERVICE_NAME}."
+        return 1
+    fi
+
+    date +%s > "$LAST_RESTART_FILE"
+}
+
+# Prunes restart_history to entries within the circuit-breaker window and
+# returns the count of restarts still in that window (via stdout).
+recent_restart_count() {
+    local now_epoch="$1"
+    local cutoff=$(( now_epoch - CIRCUIT_BREAKER_WINDOW_SECONDS ))
+    local kept=""
+    if [[ -f "$RESTART_HISTORY_FILE" ]]; then
+        kept=$(awk -v cutoff="$cutoff" '$1 >= cutoff' "$RESTART_HISTORY_FILE")
+    fi
+    printf '%s\n' "$kept" > "$RESTART_HISTORY_FILE.tmp"
+    grep -c '.' "$RESTART_HISTORY_FILE.tmp" 2>/dev/null || echo 0
+    mv "$RESTART_HISTORY_FILE.tmp" "$RESTART_HISTORY_FILE"
+}
+
+record_restart() {
+    local now_epoch="$1"
+    echo "$now_epoch" >> "$RESTART_HISTORY_FILE"
+}
+
+# Central entry point for anything that wants to restart the minion.
+# Applies the short-interval throttle and the circuit breaker, and only
+# actually restarts if both allow it.
+trigger_restart() {
+    local reason="$1"
+    local now_epoch
+    now_epoch=$(date +%s)
+
+    local last_restart_epoch=0
+    [[ -f "$LAST_RESTART_FILE" ]] && last_restart_epoch=$(cat "$LAST_RESTART_FILE")
+
+    if (( now_epoch - last_restart_epoch < MIN_RESTART_INTERVAL )); then
+        log "Skipping restart (reason: ${reason}): throttled, last restart was $((now_epoch - last_restart_epoch))s ago (< ${MIN_RESTART_INTERVAL}s)."
+        return 0
+    fi
+
+    local count
+    count=$(recent_restart_count "$now_epoch")
+
+    if (( count >= CIRCUIT_BREAKER_MAX_RESTARTS )); then
+        alert "Circuit breaker OPEN for ${SERVICE_NAME}: ${count} restarts in the last $((CIRCUIT_BREAKER_WINDOW_SECONDS / 60))m (limit ${CIRCUIT_BREAKER_MAX_RESTARTS}). NOT restarting automatically -- likely a structural problem (bad config, unreachable master, crash-loop). Manual investigation needed. Latest trigger: ${reason}."
+        touch "$CIRCUIT_BREAKER_FILE"
+        return 1
+    fi
+
+    rm -f "$CIRCUIT_BREAKER_FILE" 2>/dev/null || true
+    restart_minion "$reason"
+    record_restart "$now_epoch"
+}
+
+### ---- Main -------------------------------------------------------------###
+
+require_root
+ensure_state_dir
+
+### 1. Crash / OOM-kill detection (no log needed) ###
+minion_pids=$(get_minion_pids)
+
+if [[ -z "$minion_pids" ]]; then
+    log "CRASH DETECTED: no running salt-minion process found."
+    check_oom_kill
+    trigger_restart "process not running (crash/OOM)"
+    minion_alive=false
+else
+    log "salt-minion process present (PID(s): $(echo "$minion_pids" | tr '\n' ' '))."
+    minion_alive=true
+fi
+
+### 2 & 3. Log-based checks (hang detection + known error patterns) ###
+if [[ ! -f "$LOG_FILE" ]]; then
+    log "WARNING: log file not found at ${LOG_FILE}; skipping staleness and pattern checks. Set SALT_MINION_LOG to override."
+else
+    ### 2. Hang / zombie detection -- only meaningful if the process is alive ###
+    if [[ "$minion_alive" == true ]]; then
+        log_mtime=$(file_mtime_epoch "$LOG_FILE")
+        now_epoch=$(date +%s)
+        age_seconds=$(( now_epoch - log_mtime ))
+        stale_threshold_seconds=$(( STALE_THRESHOLD_MINUTES * 60 ))
+
+        if (( age_seconds >= stale_threshold_seconds )); then
+            log "HANG DETECTED: ${LOG_FILE} has not been modified in ${age_seconds}s (>= ${STALE_THRESHOLD_MINUTES}m threshold) even though the process is alive. Treating as wedged."
+            trigger_restart "log staleness / hung process (no writes in ${age_seconds}s)"
+        else
+            log "Log file freshness OK (last write ${age_seconds}s ago, threshold ${stale_threshold_seconds}s)."
+        fi
+    fi
+
+    ### 3. Known fatal error strings in newly-appended log content ###
+    current_size=$(file_size_bytes "$LOG_FILE")
+
+    if [[ -f "$STATE_FILE" ]]; then
+        last_offset=$(cat "$STATE_FILE")
+    else
+        last_offset="$current_size"   # first run: start watching from "now"
+    fi
+
+    if [[ "$current_size" -lt "$last_offset" ]]; then
+        log "Detected log rotation/truncation (size ${current_size} < offset ${last_offset}); resetting offset."
+        last_offset=0
+    fi
+
+    new_content=$(tail -c +"$((last_offset + 1))" "$LOG_FILE")
+
+    matched_pattern=""
+    for pattern in "${ERROR_PATTERNS[@]}"; do
+        if echo "$new_content" | grep -qF "$pattern"; then
+            matched_pattern="$pattern"
+            break
+        fi
+    done
+
+    if [[ -n "$matched_pattern" ]]; then
+        log "Detected error pattern in new log output: \"${matched_pattern}\""
+        trigger_restart "log pattern match: ${matched_pattern}"
+    else
+        log "No new occurrences of known error patterns found."
+    fi
+
+    echo "$current_size" > "$STATE_FILE"
+fi
+
+exit 0

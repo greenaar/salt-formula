@@ -1,0 +1,22 @@
+{#- -*- coding: utf-8 -*- #}
+{#- vim: ft=jinja #}
+{#-
+    deb822 apt source for Salt, rendered locally instead of downloading the
+    vendor-published salt.sources.
+
+    Only used when `salt:pkgrepo:mirror_url` is set. The field values default
+    to exactly what Salt Project publishes upstream, so a plain apt-mirror
+    (which preserves the dists/ tree and the original Broadcom signatures
+    byte-for-byte) needs nothing changed here beyond the URI.
+-#}
+# Managed by Salt - do not edit by hand.
+# Rendered from salt/files/salt.sources.jinja because
+# salt:pkgrepo:mirror_url is set. Unset it to go back to fetching the
+# vendor-published salt.sources from the salt-install-guide release.
+X-Repolib-Name: Salt Project
+Enabled: yes
+Types: {{ types }}
+URIs: {{ uris }}
+Suites: {{ suites }}
+Components: {{ components }}
+Signed-By: {{ signed_by }}

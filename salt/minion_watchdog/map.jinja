@@ -1,0 +1,23 @@
+{#-
+  salt.minion_watchdog / map.jinja
+  ---------------------------------------------------------------------------
+  Resolves salt:minion_watchdog pillar (deep-merged over defaults.yaml by
+  the parent salt/map.jinja) into the `mw` dict every state/template in
+  this sub-formula uses.
+
+  Usage from any .sls or templated file under salt/minion_watchdog/:
+
+      {% from "salt/minion_watchdog/map.jinja" import mw with context %}
+#}
+
+{%- if tplroot is not defined %}
+{#- Normal case: called from an .sls (or any context where tpldir is set
+   by the state compiler). Not true for templates rendered as the
+   `source:` of a file.managed state -- those must pass tplroot in
+   explicitly via file.managed's `context:`, since tpldir is never set
+   for that render path. #}
+{%- set tplroot = tpldir.split('/')[0] %}
+{%- endif %}
+{%- from tplroot ~ "/map.jinja" import salt_settings with context %}
+
+{%- set mw = salt_settings.minion_watchdog %}

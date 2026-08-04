@@ -1,0 +1,46 @@
+# Managed by Salt - formula: {{ tplroot }} - component: {{ component }}
+# Manual changes will be overwritten.
+
+{%- set paths = settings.get('paths', []) %}
+{%- set frequency = settings.get('frequency', 'daily') %}
+{%- set filename = settings.get('filename', '') %}
+{%- set valid_frequencies = ['hourly', 'daily', 'weekly', 'monthly', 'yearly'] %}
+{%- if not paths %}
+{{ raise('logrotate component ' ~ component ~ ' has no paths') }}
+{%- endif %}
+{%- if frequency not in valid_frequencies %}
+{{ raise('invalid logrotate frequency for ' ~ component ~ ': ' ~ frequency) }}
+{%- endif %}
+{%- if '/' in filename or '..' in filename or ' ' in filename or '\t' in filename or not filename %}
+{{ raise('unsafe logrotate filename for ' ~ component ~ ': ' ~ filename) }}
+{%- endif %}
+{%- if settings.get('size') and (settings.get('minsize') or settings.get('maxsize')) %}
+{{ raise('logrotate size cannot be combined with minsize or maxsize for ' ~ component) }}
+{%- endif %}
+{%- if settings.get('copytruncate') is sameas true and settings.get('postrotate') and not settings.get('allow_copytruncate_with_postrotate', false) %}
+{{ raise('copytruncate and postrotate are both set for ' ~ component ~ '; set allow_copytruncate_with_postrotate=true to acknowledge this intentionally') }}
+{%- endif %}
+{{ paths | join(' ') }} {
+    {{ frequency }}
+    rotate {{ settings.get('rotate', 14) }}
+{% if settings.get('maxage') is not none %}    maxage {{ settings.get('maxage') }}
+{% endif %}{% for key in ['size', 'minsize', 'maxsize'] %}{% if settings.get(key) %}    {{ key }} {{ settings.get(key) }}
+{% endif %}{% endfor %}{% set bool_directives = {
+  'missingok': ['missingok', 'nomissingok'],
+  'notifempty': ['notifempty', 'ifempty'],
+  'compress': ['compress', 'nocompress'],
+  'delaycompress': ['delaycompress', 'nodelaycompress'],
+  'dateext': ['dateext', 'nodateext'],
+  'copytruncate': ['copytruncate', 'nocopytruncate'],
+  'sharedscripts': ['sharedscripts', 'nosharedscripts']
+} %}{% for key, directives in bool_directives.items() %}{% if settings.get(key) is sameas true %}    {{ directives[0] }}
+{% elif settings.get(key) is sameas false %}    {{ directives[1] }}
+{% endif %}{% endfor %}{% if settings.get('dateformat') %}    dateformat {{ settings.get('dateformat') }}
+{% endif %}{% if settings.get('olddir') %}    olddir {{ settings.get('olddir') }}
+{% endif %}{% if settings.get('su') %}    su {{ settings.get('su') }}
+{% endif %}{% if settings.get('create') %}    create {{ settings.get('create') }}
+{% endif %}{% for script in ['prerotate', 'postrotate', 'firstaction', 'lastaction'] %}{% if settings.get(script) %}    {{ script }}
+{{ settings.get(script) | indent(8, true) }}
+    endscript
+{% endif %}{% endfor %}{% for directive in settings.get('extra_directives', []) %}    {{ directive }}
+{% endfor %}}
