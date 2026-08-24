@@ -5,7 +5,7 @@
   decrypts during Pillar compilation.
 
   Everything here is overridable through pillar under `salt:pass` (see
-  defaults.yaml and pillar.example).
+  defaults.yaml and pillar.example.sls).
 
   The resolver's options are written to a standalone `_`-prefixed file in
   master.d rather than rendered from pillar under `salt:master`. The
@@ -35,17 +35,23 @@
 {%- endif %}
 
 {#-
-  master.sls excludes only `_*` from its `clean: true` recurse over
-  master.d. A master_config placed there without the prefix is deleted on
-  the next highstate, and the master then loses pass_dir and stops
-  compiling pillar for every minion -- a failure that is silent in state
-  output. Refuse to render rather than deploy that.
+  `_*` is one of the names master.sls excludes from its `clean: true`
+  recurse over master.d, and the prefix also sorts this file ahead of every
+  other drop-in, so the resolver is configured before anything that might
+  depend on it. A master_config placed there without the prefix gives up
+  both: the master loses pass_dir and stops compiling pillar for every
+  minion -- a failure that is silent in state output. Refuse to render
+  rather than deploy that.
+
+  salt:config_d_preserve_from does list salt:pass:master_config, so a
+  renamed file would survive the recurse. The ordering guarantee is not
+  recoverable that way, and this file is the one that must not be fragile.
 #}
 {%- if _p.enabled and _p.manage_master_config %}
 {%-   set _cfg_dir = _p.master_config.rsplit('/', 1)[0] %}
 {%-   set _cfg_name = _p.master_config.rsplit('/', 1)[-1] %}
 {%-   if _cfg_dir.endswith('/master.d') and not _cfg_name.startswith('_') %}
-  {{ raise('salt:pass:master_config must use a filename starting with "_" when written into master.d (got "' ~ _cfg_name ~ '"); salt.master deploys that directory with clean:true and excludes only _* names, so any other file is deleted on the next highstate and pillar compilation fails for every minion.') }}
+  {{ raise('salt:pass:master_config must use a filename starting with "_" when written into master.d (got "' ~ _cfg_name ~ '"). The prefix sorts the resolver config ahead of every other drop-in, so it is read before anything that depends on it, and it is one of the names salt.master excludes from its clean:true recurse. Renaming it moves the file out of both guarantees, and a deleted resolver config stops pillar compiling for every minion.') }}
 {%-   endif %}
 {%- endif %}
 

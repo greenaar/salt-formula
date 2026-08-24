@@ -1,0 +1,61 @@
+{#-
+  libconfd.jinja
+  ---------------------------------------------------------------------------
+  Keeps `clean_config_d_dir` from deleting configuration this formula does not
+  own.
+
+  master.sls, minion.sls and standalone.sls deploy `<config_path>/<target>.d`
+  with `file.recurse` and `clean: true`. That deletes every file in the
+  directory the recurse did not just write - including files written by other
+  formulas, which is silent: the recurse reports success, and the addon's
+  configuration is gone until someone notices the symptom.
+
+  `exclude_pat` protects a file from both deployment and cleaning, so the fix
+  is to make sure every legitimate drop-in matches one of its patterns. This
+  macro builds that list from three sources, in increasing order of
+  specificity:
+
+    1. `salt:config_d_preserve` - conventional drop-in namespaces, defaulted
+       to `_*` and `[0-9]*`. An addon that follows either convention is safe
+       without anyone configuring anything.
+
+    2. `salt:config_d_preserve_from` - pillar keys naming a config file. Each
+       is resolved with `config.get`, and if it points into this directory,
+       its file name is preserved. This is what makes support implicit for
+       addons that do not follow a naming convention: configuring the addon
+       is enough, because the addon already had to say where its file goes.
+
+    3. `salt:<target>_config_d_preserve` - explicit extra patterns, for
+       anything the first two do not cover.
+
+  Patterns are fnmatch, matched against the file name, and Salt also accepts
+  an `E@` prefix for a regular expression.
+#}
+
+{%- macro confd_exclude_pat(salt_settings, target) -%}
+{%- set config_dir = salt_settings.config_path ~ '/' ~ target ~ '.d' -%}
+{%- set patterns = [] -%}
+
+{%- for pattern in salt_settings.get('config_d_preserve') or [] -%}
+{%-   do patterns.append(pattern|string) -%}
+{%- endfor -%}
+
+{%- for key in salt_settings.get('config_d_preserve_from') or [] -%}
+{%-   set path = salt['config.get'](key, none) -%}
+{%-   if path -%}
+{%-     set path = path|string -%}
+{#-     Only files directly in this target's config.d. An addon writing to
+        master.d must not silently affect what minion.d preserves, and a path
+        somewhere else entirely is not this recurse's business. -#}
+{%-     if path.startswith(config_dir ~ '/') and '/' not in path[config_dir|length + 1:] -%}
+{%-       do patterns.append(path.split('/')|last) -%}
+{%-     endif -%}
+{%-   endif -%}
+{%- endfor -%}
+
+{%- for pattern in salt_settings.get(target ~ '_config_d_preserve') or [] -%}
+{%-   do patterns.append(pattern|string) -%}
+{%- endfor -%}
+
+{{- patterns|unique|list|tojson -}}
+{%- endmacro -%}

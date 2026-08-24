@@ -5,7 +5,7 @@
   (https://www.passwordstore.org/) and GnuPG.
 
   Encrypted credentials live outside Pillar. Pillar carries only named
-  references such as `pass:applications/webmail/database_password`, which
+  references such as `pass:applications/roundcube/database_password`, which
   the `pass_resolver` external Pillar replaces while the master compiles
   Pillar for an authorized minion.
 
@@ -24,7 +24,7 @@
   configuration needed to repair it. The `_` prefix keeps master.sls's
   `clean: true` recurse from deleting the file. See README.md.
 
-  See pillar.example for the full pillar schema.
+  See pillar.example.sls for the full pillar schema.
 #}
 
 {%- set tplroot = tpldir.split('/')[0] %}

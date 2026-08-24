@@ -4,6 +4,7 @@
 {%- set tplroot = tpldir.split('/')[0] %}
 {%- from tplroot ~ "/map.jinja" import salt_settings with context %}
 {%- from tplroot ~ "/libtofs.jinja" import files_switch with context %}
+{%- from tplroot ~ "/libconfd.jinja" import confd_exclude_pat with context %}
 
 include:
   - {{ tplroot }}.logrotate.master
@@ -35,8 +36,11 @@ salt-master:
     - source: salt://{{ tplroot }}/files/master.d
     {%- endif %}
     - clean: {{ salt_settings.clean_config_d_dir }}
-    - exclude_pat:
-      - _*
+    {#- Protects both from deployment and from `clean`. Built from
+        salt:config_d_preserve, the config files other formulas declare in
+        their own pillar, and salt:master_config_d_preserve. See
+        libconfd.jinja. #}
+    - exclude_pat: {{ confd_exclude_pat(salt_settings, 'master') }}
   {%- if salt_settings.master_service_details.state != 'ignore' %}
   service.{{ salt_settings.master_service_details.state }}:
     - enable: {{ salt_settings.master_service_details.enabled }}

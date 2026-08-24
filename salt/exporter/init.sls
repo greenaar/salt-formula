@@ -16,7 +16,7 @@
   config, and hardened systemd services. Firewall rules are pulled in
   automatically by service.sls when salt:exporter:firewall:enabled is set.
 
-  See pillar.example for the full pillar schema and README.md for the
+  See pillar.example.sls for the full pillar schema and README.md for the
   full write-up (hardening details, multi-instance, internal mirrors...).
 #}
 

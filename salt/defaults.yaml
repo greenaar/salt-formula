@@ -5,7 +5,7 @@
 #
 # Scope: Debian 12/13 and Ubuntu 24.04+ only, Salt 3008 (onedir) and later.
 # Everything here can be overridden via pillar under the `salt:` key -- see
-# pillar.example for a fully worked example.
+# pillar.example.sls for a fully worked example.
 
 salt:
 
@@ -20,7 +20,43 @@ salt:
   rootuser: root
   rootgroup: root
   config_path: /etc/salt
+
+  # `clean_config_d_dir` makes master.d/minion.d exactly mirror what this
+  # formula deploys: anything else in there is deleted on the next run. That
+  # is what keeps a removed pillar key from leaving stale configuration
+  # behind, but on its own it also deletes drop-ins written by other
+  # formulas, and it does so silently.
   clean_config_d_dir: true
+
+  # Names and patterns clean_config_d_dir must never remove. fnmatch against
+  # the file name; Salt also accepts an `E@` prefix for a regular expression.
+  #
+  # The two defaults are the conventional drop-in namespaces: `_` for files
+  # that must be read before pillar can be compiled (salt.pass writes
+  # master.d/_pass.conf), and a numeric prefix for ordinary ordered drop-ins,
+  # as used by every other .d directory on the system. An addon that follows
+  # either one needs no configuration here at all.
+  config_d_preserve:
+    - '_*'
+    - '[0-9]*'
+
+  # Pillar keys naming a config file another formula owns. Each is resolved
+  # with config.get, and preserved if it points at a file directly inside
+  # master.d or minion.d. This is what makes addon support implicit: the
+  # addon's own pillar already says where its file goes, so configuring the
+  # addon is enough - nothing has to be repeated under `salt:`.
+  #
+  # Add a key here when adopting a new addon that writes into master.d or
+  # minion.d without a `_` or numeric prefix. A key that resolves to nothing
+  # is ignored, so listing an addon you do not use costs nothing.
+  config_d_preserve_from:
+    - alcali:salt_master:config_file
+    - salt_deploy:master:config_file
+    - salt:pass:master_config
+
+  # Extra patterns for one target only, appended to config_d_preserve.
+  master_config_d_preserve: []
+  minion_config_d_preserve: []
   parallel: true                # used by salt.formulas' file/git states
   retry_options:
     attempts: 2
@@ -531,7 +567,7 @@ salt:
       file_group: ''              # blank => exporter group
       file_mode: '0640'
     instances:
-      default: {}                  # see pillar.example for the full per-instance schema
+      default: {}                  # see pillar.example.sls for the full per-instance schema
 
   # ---------------------------------------------------------------------
   # pass-backed credential store for the master (was the standalone

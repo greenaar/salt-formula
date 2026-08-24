@@ -12,6 +12,7 @@ everything Salt has ever run on.
 - [Quickstart](#quickstart)
 - [Architecture Overview](#architecture-overview)
 - [Common deployment examples](#common-deployment-examples)
+- [Addon configuration in master.d and minion.d](#addon-configuration-in-masterd-and-miniond)
 - [Logrotate configuration reference](#logrotate-configuration-reference)
 - [Sub-states Reference](#sub-states-reference)
 - [Migrating](#migrating-from-the-old-ad-hoc-saltmastersls)
@@ -55,7 +56,7 @@ base:
     - salt
 ```
 
-Use `pillar.example` as a safe starting point. `pillar.reference.sls` is the exhaustive, commented configuration reference.
+Use `pillar.example.sls` as a safe starting point. `pillar.reference.sls` is the exhaustive, commented configuration reference.
 
 ## Architecture Overview
 
@@ -180,7 +181,7 @@ need to be set in pillar.
 ## Common deployment examples
 
 The examples below are intentionally minimal. Start with the closest pattern,
-then copy additional settings from `pillar.example` as needed.
+then copy additional settings from `pillar.example.sls` as needed.
 
 ### Managed minion
 
@@ -306,6 +307,102 @@ salt:
 Set `manage_directory` or `manage_file` to `false` under `exporter:log` or an
 individual instance's `log` block when another formula owns those paths.
 
+## Addon configuration in master.d and minion.d
+
+`master.sls`, `minion.sls` and `standalone.sls` deploy `master.d` / `minion.d`
+with `file.recurse` and `clean: true`. That is what keeps a removed pillar key
+from leaving stale configuration behind — the directory ends up mirroring
+exactly what the formula deploys.
+
+On its own it also deletes drop-ins written by *other* formulas, and it does
+so silently: the recurse reports success and the addon's configuration is
+simply gone. The next symptom is somewhere else entirely — pillar stops
+compiling, jobs stop being returned, logins start failing — and nothing points
+back at this state.
+
+`exclude_pat` protects a file from being deployed *and* from being cleaned.
+The formula builds that list in `libconfd.jinja` from three sources.
+
+### 1. Conventional namespaces — nothing to configure
+
+`salt:config_d_preserve` defaults to:
+
+```yaml
+salt:
+  config_d_preserve:
+    - '_*'
+    - '[0-9]*'
+```
+
+An addon whose drop-in is named `_something.conf` or `50-something.conf` is
+safe without anyone configuring anything. `[0-9]*` is the ordinary `.d`
+drop-in convention used everywhere else on the system, and `_*` is this
+formula's own convention for files that must be readable before pillar can
+compile — see [Credential store](#credential-store-pass-master-only).
+
+If you are writing a new addon, name its file this way and stop reading here.
+
+### 2. Addon pillar keys — implicit for existing addons
+
+Not every addon follows a convention, and renaming an established config file
+is its own kind of breakage. `salt:config_d_preserve_from` lists pillar keys
+that name a config file:
+
+```yaml
+salt:
+  config_d_preserve_from:
+    - alcali:salt_master:config_file
+    - salt_deploy:master:config_file
+    - salt:pass:master_config
+```
+
+Each is resolved with `config.get`. If it points at a file directly inside the
+directory being recursed, that file name is added to `exclude_pat`.
+
+This is what makes the support implicit: the addon's own pillar already had to
+say where its file goes, so **configuring the addon is enough**. Setting
+`alcali:salt_master:config_file` protects `master.d/alcali.conf` without
+touching anything under `salt:`.
+
+A key that resolves to nothing is ignored, so listing an addon you do not use
+costs nothing. A path outside the directory, or in a subdirectory of it, is
+ignored too — `exclude_pat` matches a relative path, so a bare file name lifted
+out of a nested path would protect the wrong thing.
+
+Add a key here when adopting a new addon that writes into `master.d` or
+`minion.d` under a name matching neither convention.
+
+### 3. Explicit patterns — everything else
+
+For a file you cannot rename and whose path is not in pillar:
+
+```yaml
+salt:
+  master_config_d_preserve:
+    - 'vendor-*.conf'
+  minion_config_d_preserve: []
+```
+
+These are appended for one target only. Keep them narrow: a pattern wide
+enough to cover an addon is also wide enough to stop the formula cleaning up
+its own stale files, and that failure is just as quiet.
+
+### Checking what a run would preserve
+
+```bash
+salt-call --local state.show_sls salt.master | grep -A5 exclude_pat
+```
+
+`tests/validate_config_d_preserve.py` pins the derived list down for each of
+the cases above and runs without a minion.
+
+### Turning the cleaning off
+
+`salt:clean_config_d_dir: false` stops the deletion entirely. It also stops
+the formula removing its own stale files, so a key you remove from pillar
+keeps taking effect until someone deletes the file by hand. Prefer preserving
+the specific names.
+
 ## Configuration precedence
 
 Configuration is merged in this order, with later sources winning:
@@ -316,7 +413,7 @@ Configuration is merged in this order, with later sources winning:
 
 Most master and minion keys are passed through to Salt configuration files, so
 valid native Salt options can be supplied even when they are not explicitly
-listed in `pillar.example`. Formula-specific options such as `pkgrepo`,
+listed in `pillar.example.sls`. Formula-specific options such as `pkgrepo`,
 `extensions`, `exporter`, `minion_watchdog`, and `logrotate` are documented in
 this README and in `defaults.yaml`.
 
@@ -451,7 +548,8 @@ master configuration options, each with full documentation comments.
 - Installs `salt-master` (or skips if `install_packages: false`)
 - Recursively deploys `<config_path>/master.d/` from templates (TOFS or bundled)
 - Cleans the config.d directory (`clean_config_d_dir`, default true)
-- Excludes files starting with `_` from deployment
+- Preserves addon drop-ins from that cleaning — see
+  [Addon configuration in master.d and minion.d](#addon-configuration-in-masterd-and-miniond)
 - Enables and starts the `salt-master` service
 - Removes legacy `/etc/salt/master` file if `master_remove_config: true`
 - Removes old `_defaults.conf` file from earlier formula versions
@@ -889,7 +987,7 @@ salt:
 ```
 
 SaltGUI is a static app that talks to salt-api's `rest_cherrypy`
-endpoint - make sure `salt:api` is configured (see `pillar.example`)
+endpoint - make sure `salt:api` is configured (see `pillar.example.sls`)
 and reachable from wherever SaltGUI is served.
 
 ## Salt Exporter (Prometheus metrics, master-only)
@@ -945,7 +1043,7 @@ Highlights:
   formula/mine consumer elsewhere - this formula doesn't assume how you
   run Prometheus).
 
-See `pillar.example` for a full worked example. One bug fixed while
+See `pillar.example.sls` for a full worked example. One bug fixed while
 folding this in: the original standalone formula's `install.sls` and
 `config.sls` both did `include: [salt-exporter.user]`, but no `user.sls`
 ever shipped - the user/group creation state didn't actually exist.
@@ -1016,7 +1114,7 @@ A few things worth knowing before you lean on this:
   cat /etc/salt/minion.d/defaults.conf               # the file directly
   ```
 
-- **There's no example of `schedule` in `pillar.example`.** That file's
+- **There's no example of `schedule` in `pillar.example.sls`.** That file's
   comment on line 42 just lists `schedule` alongside `publisher_acl`/`external_auth`/`reactor`/`engines`
   as "things that can go here" - it isn't spelled out with a worked example the way
   `exporter`/`saltgui`/`extensions` are. Treat Salt's own [schedule
@@ -1103,14 +1201,16 @@ bootstrap problem.
 
 `master.sls` deploys `master.d` with `file.recurse` and
 `clean: {{ salt_settings.clean_config_d_dir }}` (default true), which
-deletes every file in that directory it does not manage. Only `_*` names
-are excluded, via `exclude_pat`.
+deletes every file in that directory it does not manage. `_*` is one of the
+conventional namespaces `exclude_pat` protects; see
+[Addon configuration in master.d and minion.d](#addon-configuration-in-masterd-and-miniond)
+for the rest.
 
-A resolver config written there under any other name is silently removed on
-the next highstate — the state output reports success, and Pillar stops
-compiling for every minion. `map.jinja` refuses to render if
-`salt:pass:master_config` points into `master.d` without the prefix, rather
-than deploying a file that is guaranteed to disappear.
+The prefix still carries its own weight here. `map.jinja` refuses to render
+if `salt:pass:master_config` points into `master.d` without it, and that
+check is not only about `clean`: `_pass.conf` sorts before every other
+drop-in, so the resolver is configured before anything that might depend on
+it.
 
 If you ever see `Failed to load ext_pillar pass_resolver`, check that the
 file still exists before anything else.
@@ -1164,10 +1264,10 @@ useful without the other.
 terminal echo disabled, so they never reach shell history:
 
 ```bash
-sudo salt-secret add applications/webmail/database_password
+sudo salt-secret add applications/roundcube/database_password
 sudo salt-secret generate infrastructure/cloudflare/api_token 40
 sudo salt-secret edit applications/example/private_key   # multiline
-sudo salt-secret list applications/webmail
+sudo salt-secret list applications/roundcube
 ```
 
 The `secret_store` runner (`salt-run saltutil.sync_runners`) covers the
@@ -1225,7 +1325,7 @@ salt:
 - **Configurable everything** - script/log/state paths, cron schedule,
   hang threshold, extra error patterns, circuit-breaker limits, and an
   `alert_cmd` (e.g. a Slack webhook curl) run when the circuit breaker
-  opens. See `pillar.example` and `defaults.yaml` for the full list.
+  opens. See `pillar.example.sls` and `defaults.yaml` for the full list.
 - **Disabling it** just means leaving `salt:minion_watchdog:enabled` at
   its default `false` (or explicitly `false`) - `salt.minion_watchdog`
   then routes to `minion_watchdog/absent.sls`, which removes the script,
@@ -1267,7 +1367,7 @@ Two real bugs were fixed while reviewing these for this refactor:
 
 ## Pillar reference
 
-See `pillar.example` for a complete example and `defaults.yaml` for every
+See `pillar.example.sls` for a complete example and `defaults.yaml` for every
 available key and its default value (each is commented). Highlights:
 
 | Pillar Key | Purpose |
@@ -1282,6 +1382,9 @@ available key and its default value (each is commented). Highlights:
 | `salt:rootuser` / `salt:rootgroup` | User/group for file permissions (default: root/root) |
 | `salt:config_path` | Config directory (default: `/etc/salt`) |
 | `salt:clean_config_d_dir` | Clean .d/ dirs before deploying (default: true) |
+| `salt:config_d_preserve` | fnmatch patterns `clean_config_d_dir` must never remove (default: `_*`, `[0-9]*`) |
+| `salt:config_d_preserve_from` | Pillar keys naming an addon's config file; resolved and preserved automatically |
+| `salt:master_config_d_preserve` / `minion_config_d_preserve` | Extra patterns for one target only |
 | `salt:parallel` / `salt:retry_options` | Git/formulas retry settings |
 | **Package names** | |
 | `salt:salt_master/minion/syndic/cloud/api/ssh` | Package name overrides |
@@ -1417,7 +1520,7 @@ respectively (see the include table above), so:
 
 - Every other key underneath keeps its old name (`instances`, `firewall`,
   `prometheus`, `cron`, `circuit_breaker`, ...) - only the top-level
-  nesting changed. See `pillar.example` for both in full.
+  nesting changed. See `pillar.example.sls` for both in full.
 - File paths, systemd unit names, the script path, and the exporter
   binary/symlink locations are all unchanged, so an in-place migration
   on an already-provisioned host is just a pillar edit + re-apply, not a
@@ -1479,7 +1582,7 @@ exists in the minion's compiled pillar with `salt-call pillar.get salt`.
 
 ## Documentation files
 
-- `pillar.example` is intentionally short and safe to copy.
+- `pillar.example.sls` is intentionally short and safe to copy.
 - `pillar.reference.sls` exposes the complete configuration surface and
   advanced examples.
 - `defaults.yaml` remains the source of truth for defaults.
@@ -1494,6 +1597,7 @@ exists in the minion's compiled pillar with `salt-call pillar.get salt`.
 | `map.jinja` | Top-level map data (defaults.yaml rendering, OS detection) |
 | `_mapdata/_mapdata.jinja` | Map data helper for sub-states |
 | `libtofs.jinja` | TOFS (Template Override File Server) file switching helper |
+| `libconfd.jinja` | Builds the `exclude_pat` that keeps `clean_config_d_dir` from deleting addon drop-ins |
 | `formulas.jinja` | Third-party formula management helpers |
 | `osfamilymap.yaml` / `osmap.yaml` | OS-specific value mappings |
 | `master.sls` | Master package, config, service |
@@ -1516,33 +1620,3 @@ exists in the minion's compiled pillar with `salt-call pillar.get salt`.
 | `files/cloud.providers.d/` | Cloud provider templates (EC2, Saltify, GCE, RSOS) |
 | `files/cloud.profiles.d/` | Cloud profile templates |
 | `files/cloud.maps.d/` | Cloud map templates |
-
-## Relationship to upstream
-
-**This is a heavily modified fork of
-[`saltstack-formulas/salt-formula`](https://github.com/saltstack-formulas/salt-formula). Do not treat it as a drop-in
-replacement for it.**
-
-States have been renamed, split, merged, and removed; pillar keys have moved;
-defaults differ; and behaviour has changed in ways that are not backward
-compatible. Pointing an existing deployment at this formula without reading
-`pillar.example` and the state list above will not do what you expect.
-
-It is also not a newer version of upstream — it diverged and was maintained
-separately, so upstream may well have fixes and platform support that this
-does not. If you want the maintained original, use
-[`saltstack-formulas/salt-formula`](https://github.com/saltstack-formulas/salt-formula).
-
-### Credit
-
-The foundation of this formula, and much of what still works well in it, is
-the work of the [saltstack-formulas](https://github.com/saltstack-formulas) authors and contributors. Any
-bugs introduced in the divergence are this fork's own.
-
-Specific third-party files bundled here, with their own authors and
-licenses, are itemised in [THIRD-PARTY.md](THIRD-PARTY.md).
-
-## License
-
-Dedicated to the public domain under [CC0 1.0 Universal](LICENSE), with the
-exception of the third-party files listed in [THIRD-PARTY.md](THIRD-PARTY.md).

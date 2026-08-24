@@ -26,8 +26,21 @@
   are not installed twice, and the apt side merges into the existing
   `build_dependencies` `pkg.installed` state.
 - `tests/validate_extensions_beacon_deps.py` covering the resolution above.
+- `libconfd.jinja` and `salt:config_d_preserve` / `salt:config_d_preserve_from` /
+  `salt:{master,minion}_config_d_preserve` - addon drop-ins in `master.d` and
+  `minion.d` are no longer deleted by the `clean: true` recurse. `_*` and
+  `[0-9]*` are preserved by convention, and files named by another formula's
+  own pillar (`alcali:salt_master:config_file`,
+  `salt_deploy:master:config_file`, `salt:pass:master_config`) are resolved and
+  preserved without any configuration under `salt:`.
+- `tests/validate_config_d_preserve.py` covering the derived pattern list.
 
 ### Changed
 
+- `master.sls`, `minion.sls` and `standalone.sls` build `exclude_pat` from
+  `libconfd.jinja` instead of hardcoding `_*`. Previously any drop-in written
+  by another formula was deleted on the next highstate while the state still
+  reported success; the symptom always surfaced somewhere else. Existing
+  behaviour is unchanged for `_*` names.
 - Exporter rotation defaults to one snippet per instance.
-- `pillar.example` is intended as a safe practical example; the exhaustive reference is separate.
+- `pillar.example.sls` is intended as a safe practical example; the exhaustive reference is separate.

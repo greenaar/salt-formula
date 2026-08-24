@@ -8,7 +8,7 @@ Run standalone against any already-highstated host with:
     py.test --hosts=ssh://user@host test_salt_exporter.py
 
 These assertions intentionally avoid hardcoding a specific exporter
-version so pillar.example can be bumped without touching this file.
+version so pillar.example.sls can be bumped without touching this file.
 Requires pillar with at least:
 
     salt:
