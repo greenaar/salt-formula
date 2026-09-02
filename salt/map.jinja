@@ -1,25 +1,45 @@
 # -*- coding: utf-8 -*-
 # vim: ft=jinja
 
-{#- Start imports #}
-{% import_yaml "salt/defaults.yaml" as defaults %}
-{% import_yaml "salt/osfamilymap.yaml" as osfamilymap %}
-{% import_yaml "salt/osmap.yaml" as osmap %}
+{#- Merge order, lowest precedence first:
 
-{# merge the osfamilymap #}
-{% set osfamily_map = salt['grains.filter_by'](osfamilymap, grain='os_family') or {} %}
-{% do salt['defaults.merge'](defaults['salt'], osfamily_map) %}
+      1. defaults.yml          the formula's own defaults
+      2. osfamilymap.yml       by `os_family` grain
+      3. osmap.yml             by `os` grain
+      4. pillar salt:lookup    overrides carried under a `lookup` key
+      5. pillar salt           everything else
 
-{# merge the osmap #}
-{% set os_map = salt['grains.filter_by'](osmap, grain='os') or {} %}
-{% do salt['defaults.merge'](defaults['salt'], os_map) %}
+   Layers 1-4 replace three `defaults.merge` calls, which merged in place into
+   the dict import_yaml had just returned; strategy='recurse' matches what they
+   did (salt.utils.dictupdate.update) and merge_lists=False matches their
+   default, so a list from the OS tables or from salt:lookup replaces rather
+   than extends.
 
-{# merge the lookup #}
-{% set lookup = salt['pillar.get']('salt:lookup', default={}, merge=True) %}
-{% do salt['defaults.merge'](defaults['salt'], lookup) %}
+   Layer 5 keeps its own semantics: pillar.get(merge=True) reads this master's
+   pillar_merge_lists: true (pillarstack/common/salt.yml:32), so a list in the
+   `salt` pillar extends the default list (de-duplicated). One merge_all cannot
+   express both, hence the two calls.
 
-{#- Merge in salt pillar #}
-{% set salt_settings = salt['pillar.get']('salt', default=defaults['salt'], merge=True) %}
+   Neither OS table carries a `default:` key, so a grain matching nothing
+   contributes an empty dict, exactly as filter_by returning None did. -#}
+{%- import_yaml "salt/defaults.yml" as defaults %}
+{%- import_yaml "salt/osfamilymap.yml" as osfamilymap %}
+{%- import_yaml "salt/osmap.yml" as osmap %}
+
+{%- set salt_defaults = salt['slsutil.merge_all']([
+      defaults.salt,
+      osfamilymap.get(grains.get('os_family'), {}) or {},
+      osmap.get(grains.get('os'), {}) or {},
+      salt['pillar.get']('salt:lookup', {}),
+    ], strategy='recurse', merge_lists=False)
+%}
+
+{%- set salt_settings = salt['slsutil.merge'](
+      salt_defaults,
+      salt['pillar.get']('salt', {}),
+      strategy='recurse',
+      merge_lists=True
+   ) %}
 
 {#- Guard against a foreign/legacy pillar setting `salt:pkgrepo` to a plain
    string (the old hand-built `deb [signed-by=...] ...` line pattern this
@@ -27,12 +47,20 @@
    pillar value fully replaces the dict default rather than merging into
    it, so every `salt_settings.pkgrepo.*` lookup would hard-fail. Fall back
    to the packaged default instead. #}
+{#- salt_defaults, not defaults.salt: the fallback has to be the value after
+    the OS tables and salt:lookup have been applied, which is what the old
+    in-place defaults.merge chain left in defaults['salt']. -#}
 {%- if salt_settings.pkgrepo is not mapping %}
-{%-   do salt_settings.update({'pkgrepo': defaults['salt']['pkgrepo']}) %}
+{%-   do salt_settings.update({'pkgrepo': salt_defaults['pkgrepo']}) %}
 {%- endif %}
 
-{#- Merge in salt_formulas pillar #}
-{% set formulas_settings = salt['pillar.get']('salt_formulas', default=defaults['salt_formulas'], merge=True) %}
+{#- salt_formulas takes no OS layer and no lookup, only defaults + pillar. -#}
+{%- set formulas_settings = salt['slsutil.merge'](
+      defaults.salt_formulas,
+      salt['pillar.get']('salt_formulas', {}),
+      strategy='recurse',
+      merge_lists=True
+   ) %}
 
 {#- This formula only targets the Debian os_family (Debian 12/13, Ubuntu 24.04+). #}
 {% set is_supported_os = grains.get('os_family', '') == 'Debian' %}
